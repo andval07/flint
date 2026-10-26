@@ -1,0 +1,9 @@
+# 1) generic gate count of the core alone
+# 2) iCE40 UP5K mapping of the timing harness, for nextpnr
+read_verilog -sv rtl/alu.v rtl/decoder.v rtl/regfile.v rtl/core.v
+synth -top core -flatten
+tee -o build/generic_stat.txt stat
+design -reset
+read_verilog -sv rtl/alu.v rtl/decoder.v rtl/regfile.v rtl/core.v synth/timing_top.v
+synth_ice40 -top timing_top -json build/core_ice40.json
+tee -o build/ice40_stat.txt stat
