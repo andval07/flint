@@ -6,7 +6,7 @@ import pytest
 
 from flint import rtlsim
 from flint.asm import assemble
-from flint.iss import Iss
+from flint.iss import Iss, Trap
 
 
 def check(image: bytes) -> rtlsim.RtlResult:
@@ -173,3 +173,170 @@ def random_program(rng: random.Random, length: int = 120) -> str:
 @pytest.mark.parametrize("seed", range(40))
 def test_random_lockstep(seed: int) -> None:
     check(assemble(random_program(random.Random(seed))))
+
+
+# --- traps ---------------------------------------------------------------------
+
+MTIMECMP = "0x02004000"
+MTIME = "0x0200bff8"
+
+# Skips the instruction that raised an exception; for the timer it pushes
+# mtimecmp forward. Uses only s2-s4, which the programs below leave alone.
+HANDLER = f"""
+handler:
+    addi s2, s2, 1
+    csrr s3, mcause
+    blt s3, zero, irq
+    csrr s3, mepc
+    addi s3, s3, 4
+    csrw mepc, s3
+    mret
+irq:
+    li s3, {MTIME}
+    lw s4, 0(s3)
+    addi s4, s4, INTERVAL
+    li s3, {MTIMECMP}
+    sw s4, 0(s3)
+    mret
+"""
+
+TRAP_DIRECTED = {
+    "ecall_flushes_younger_instructions": """
+        li t0, handler
+        csrw mtvec, t0
+        li a0, 1
+        ecall
+        addi a0, a0, 10
+        li t0, 0x10000004
+        sw a0, 0(t0)
+        halt
+    handler:
+        csrr t1, mepc
+        addi t1, t1, 8
+        csrw mepc, t1
+        mret
+    """,
+    "csr_read_feeds_next_instruction": """
+        li t0, 0x123
+        csrw mscratch, t0
+        csrrw a1, mscratch, zero
+        addi a0, a1, 1
+        csrr a2, mscratch
+        add a0, a0, a2
+        halt
+    """,
+    "csrw_mtvec_right_before_ecall": """
+        li t0, handler
+        csrw mtvec, t0
+        ecall
+        li a0, 99
+        halt
+    handler:
+        csrr a0, mcause
+        halt
+    """,
+    "mepc_write_then_mret": """
+        li t0, there
+        csrw mepc, t0
+        mret
+        li a0, 99
+        halt
+    there:
+        li a0, 5
+        halt
+    """,
+    "illegal_store_does_not_write": """
+        li t0, handler
+        csrw mtvec, t0
+        li t1, 0x400
+        li t2, 77
+        sw t2, 0(t1)
+        csrr a0, 0x7c0
+        sw zero, 0(t1)
+        halt
+    handler:
+        lw a0, 0(t1)
+        csrr a1, mtval
+        halt
+    """,
+    "user_mode_cannot_touch_csrs_or_mret": """
+        li t0, handler
+        csrw mtvec, t0
+        li t0, user
+        csrw mepc, t0
+        mret
+    user:
+        csrr a0, mstatus
+        mret
+        ecall
+        halt
+    """ + HANDLER.replace("INTERVAL", "1"),
+    "timer_interrupt_in_load_use_stall": f"""
+        li t0, handler
+        csrw mtvec, t0
+        li t0, {MTIMECMP}
+        li t1, 14
+        sw t1, 0(t0)
+        li t0, 0x80
+        csrw mie, t0
+        csrsi mstatus, 8
+        li t0, 0x400
+        lw t1, 0(t0)
+        addi t1, t1, 1
+        lw t1, 0(t0)
+        addi t1, t1, 1
+        lw t1, 0(t0)
+        addi t1, t1, 1
+        mv a0, s2
+        halt
+    """ + HANDLER.replace("INTERVAL", "12"),
+}
+
+
+@pytest.mark.parametrize("name", TRAP_DIRECTED)
+def test_trap_directed(name: str) -> None:
+    got = check(assemble(TRAP_DIRECTED[name]))
+    assert any(isinstance(entry, Trap) for entry in got.log) or name.startswith(
+        ("csr_read", "mepc_write")
+    )
+
+
+def test_trap_costs_four_cycles() -> None:
+    plain = check(assemble("nop\nnop\nnop\nhalt"))
+    trapped = check(assemble("li t0, handler\ncsrw mtvec, t0\nnop\necall\n"
+                             "handler:\nhalt"))
+    # the ecall slot does not retire, then IF, ID and EX refill from mtvec
+    assert trapped.cycles - trapped.retired == plain.cycles - plain.retired + 4
+
+
+def random_trap_program(rng: random.Random, user: bool, length: int = 150) -> str:
+    """Random hazards plus timer interrupts, CSR traffic, ecalls and illegal CSRs."""
+    interval = rng.randint(12, 40)  # longer than the handler, or it livelocks
+    lines = [
+        "li t0, handler", "csrw mtvec, t0",
+        f"li t0, {MTIMECMP}", f"li t1, {rng.randint(10, 40)}", "sw t1, 0(t0)",
+        "li t0, 0x80", "csrw mie, t0", "csrsi mstatus, 8",
+    ]
+    if user:
+        lines += ["li t0, body", "csrw mepc, t0", "mret", "body:"]
+    body = random_program(rng, length).splitlines()[:-2]  # no xor/halt yet
+    csr_ops = [
+        "csrrw {rd}, mscratch, {rs}", "csrrs {rd}, mscratch, {rs}",
+        "csrrc {rd}, mscratch, {rs}", "csrr {rd}, mip", "csrr {rd}, mstatus",
+        "csrr {rd}, 0x7c0", "ecall", "ebreak", "wfi",
+        f"li {{rd}}, {MTIME}\nlw {{rd}}, 0({{rd}})",
+    ]
+    for line in body:
+        lines.append(line)
+        if rng.random() < 0.1:
+            op = rng.choice(csr_ops)
+            lines.append(op.format(rd=rng.choice(REGS), rs=rng.choice(REGS)))
+    lines += ["xor a0, a0, s2", "halt"]
+    return "\n".join(lines) + HANDLER.replace("INTERVAL", str(interval))
+
+
+@pytest.mark.parametrize("user", [False, True], ids=["machine", "user"])
+@pytest.mark.parametrize("seed", range(20))
+def test_random_traps_lockstep(seed: int, user: bool) -> None:
+    got = check(assemble(random_trap_program(random.Random(1000 + seed), user)))
+    assert sum(isinstance(entry, Trap) for entry in got.log) > 0
