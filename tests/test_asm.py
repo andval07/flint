@@ -25,6 +25,21 @@ jal ra, start
 jalr ra, 8(a0)
 lui a0, 0xfffff
 auipc t1, 0x12
+csrrw a0, mtvec, a1
+csrrs t0, mstatus, zero
+csrrc a2, mie, a3
+csrrwi a0, mscratch, 31
+csrrsi zero, mstatus, 8
+csrrci a1, 0x344, 1
+csrr a0, mcause
+csrw mepc, t0
+csrs mie, a1
+csrc mstatus, a2
+csrwi mtval, 0
+ecall
+ebreak
+mret
+wfi
 end:
 nop
 """

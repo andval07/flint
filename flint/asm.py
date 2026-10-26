@@ -1,7 +1,8 @@
 """A small two-pass RV32I assembler for tests and random programs.
 
-Supports every RV32I instruction the core runs, labels, and the pseudo
-instructions nop, li, mv, j and halt. It is not meant to replace a real
+Supports every RV32I instruction the core runs, the Zicsr instructions,
+ecall/ebreak/mret/wfi, labels, and the pseudo instructions nop, li, mv, j,
+csrr/csrw/csrs/csrc (and their immediate forms) and halt. It is not meant to replace a real
 toolchain: C programs go through zig cc instead.
 """
 
@@ -23,6 +24,16 @@ OP_IMM = {"addi": 0, "slti": 2, "sltiu": 3, "xori": 4, "ori": 6, "andi": 7}
 SHIFT_IMM = {"slli": (1, 0x00), "srli": (5, 0x00), "srai": (5, 0x20)}
 LOADS = {"lb": 0, "lh": 1, "lw": 2, "lbu": 4, "lhu": 5}
 STORES = {"sb": 0, "sh": 1, "sw": 2}
+CSR_OPS = {"csrrw": 1, "csrrs": 2, "csrrc": 3, "csrrwi": 5, "csrrsi": 6, "csrrci": 7}
+CSR_PSEUDO = {  # name: (funct3, writes rd)
+    "csrr": (2, True), "csrw": (1, False), "csrs": (2, False), "csrc": (3, False),
+    "csrwi": (5, False), "csrsi": (6, False), "csrci": (7, False),
+}
+CSR_NAMES = {
+    "mstatus": 0x300, "mie": 0x304, "mtvec": 0x305, "mscratch": 0x340,
+    "mepc": 0x341, "mcause": 0x342, "mtval": 0x343, "mip": 0x344,
+}
+SYSTEM = {"ecall": 0x000, "ebreak": 0x001, "mret": 0x302, "wfi": 0x105}
 BRANCHES = {"beq": 0, "bne": 1, "blt": 4, "bge": 5, "bltu": 6, "bgeu": 7}
 
 ABI = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1"] + [
@@ -181,7 +192,37 @@ def encode(name: str, args: list[str], pc: int, labels: dict[str, int]) -> list[
     if name == "jal":
         rd, target = ("ra", args[0]) if len(args) == 1 else args
         return [enc_j(number(target, labels, pc, True), reg(rd))]
+    if name in CSR_OPS or name in CSR_PSEUDO:
+        return [encode_csr(name, args, labels, pc)]
+    if name in SYSTEM:
+        expect(name, args, 0)
+        return [SYSTEM[name] << 20 | 0x73]
     return encode_pseudo(name, args, pc, labels)
+
+
+def encode_csr(name: str, args: list[str], labels: dict[str, int], pc: int) -> int:
+    if name in CSR_OPS:
+        expect(name, args, 3)
+        funct3, rd, csr_token, source = CSR_OPS[name], args[0], args[1], args[2]
+    else:
+        expect(name, args, 2)
+        funct3, writes_rd = CSR_PSEUDO[name]
+        if writes_rd:
+            rd, csr_token, source = args[0], args[1], "zero"
+        else:
+            rd, csr_token, source = "zero", args[0], args[1]
+    csr = CSR_NAMES.get(csr_token)
+    if csr is None:
+        csr = number(csr_token, labels, pc, False)
+    if not 0 <= csr < 4096:
+        raise AsmError(f"csr {csr} out of range")
+    if funct3 & 4:
+        field = number(source, labels, pc, False)
+        if not 0 <= field < 32:
+            raise AsmError(f"csr immediate {field} out of range")
+    else:
+        field = reg(source)
+    return csr << 20 | field << 15 | funct3 << 12 | reg(rd) << 7 | 0x73
 
 
 def encode_mem(name: str, args: list[str], labels: dict[str, int], pc: int) -> int:

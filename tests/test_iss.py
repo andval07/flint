@@ -3,7 +3,7 @@
 import pytest
 
 from flint.asm import assemble
-from flint.iss import Iss, SimError
+from flint.iss import Iss, SimError, Trap
 
 
 def run(source: str) -> Iss:
@@ -96,11 +96,119 @@ def test_halt_sets_exit_code():
     assert iss.exit_code == 42
 
 
-def test_illegal_instruction_raises():
-    with pytest.raises(SimError, match="illegal"):
-        Iss(b"\xff\xff\xff\xff").run()
+def test_illegal_instruction_traps():
+    iss = Iss(b"\xff\xff\xff\xff")
+    assert iss.step() == Trap(0, 2)
+    assert (iss.mepc, iss.mtval, iss.pc) == (0, 0xFFFF_FFFF, 0)
 
 
 def test_misaligned_load_raises():
     with pytest.raises(SimError, match="misaligned"):
         run("li t0, 0x1001\nlw a0, 0(t0)")
+
+
+# --- privileged subset -------------------------------------------------------
+
+TRAP_TO_HANDLER = """
+    li t0, handler
+    csrw mtvec, t0
+"""
+
+
+def test_ecall_from_machine_mode_enters_handler_and_mret_returns():
+    iss = run(TRAP_TO_HANDLER + """
+    li a0, 1
+    ecall
+    addi a0, a0, 10
+    halt
+handler:
+    csrr t1, mepc
+    addi t1, t1, 4
+    csrw mepc, t1
+    addi a0, a0, 100
+    mret
+""")
+    assert iss.exit_code == 111
+    assert iss.mcause == 11
+
+
+def test_csr_read_modify_write():
+    iss = run("""
+    li t0, 0xff
+    csrw mscratch, t0
+    csrrci a1, mscratch, 0xf
+    csrrsi a2, mscratch, 1
+    csrrc a3, mscratch, t0
+    csrr a0, mscratch
+    add a0, a0, a1
+    add a0, a0, a2
+    add a0, a0, a3
+    halt
+""")
+    assert iss.exit_code == 0xFF + 0xF0 + 0xF1
+
+
+def test_mret_drops_to_user_mode_and_user_ecall_traps():
+    iss = run(TRAP_TO_HANDLER + """
+    li t0, user
+    csrw mepc, t0
+    mret
+user:
+    li a0, 5
+    ecall
+handler:
+    csrr a0, mcause
+    halt
+""")
+    assert iss.exit_code == 8
+    assert iss.priv == 3
+
+
+def test_csr_access_from_user_mode_is_illegal():
+    iss = run(TRAP_TO_HANDLER + """
+    li t0, user
+    csrw mepc, t0
+    mret
+user:
+    csrr a0, mscratch
+handler:
+    csrr a0, mcause
+    csrr a1, mtval
+    halt
+""")
+    assert iss.exit_code == 2
+    assert iss.regs[11] == 0x3400_2573  # csrr a0, mscratch
+
+
+def test_timer_interrupt_fires_on_the_compare_instruction():
+    iss = run(TRAP_TO_HANDLER + """
+    li t0, 0x02004000
+    li t1, 20
+    sw t1, 0(t0)
+    li t0, 0x80
+    csrw mie, t0
+    csrsi mstatus, 8
+loop:
+    j loop
+handler:
+    csrr a0, mcause
+    li t0, 0x0200bff8
+    lw a1, 0(t0)
+    srli a0, a0, 31
+    halt
+""")
+    assert iss.exit_code == 1
+    assert iss.regs[11] == 20 + 3  # mtime counts retired instructions
+    assert iss.mstatus & 0x88 == 0x80  # MIE cleared, MPIE set
+
+
+def test_timer_stays_pending_while_interrupts_are_disabled():
+    iss = run("""
+    li t0, 0x02004000
+    sw zero, 0(t0)
+    li t0, 0x80
+    csrw mie, t0
+    csrr a0, mip
+    halt
+""")
+    assert iss.exit_code == 0x80
