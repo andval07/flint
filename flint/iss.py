@@ -149,7 +149,7 @@ def branch_taken(funct3: int, a: int, b: int) -> bool:
         return a < b
     if funct3 == 7:
         return a >= b
-    raise _Trap(CAUSE_ILLEGAL)
+    raise ValueError(funct3)
 
 
 class Iss:
@@ -325,6 +325,8 @@ class Iss:
             result = next_pc
             next_pc = (a + imm_i(inst)) & MASK32 & ~1
         elif opcode == 0x63:  # BRANCH
+            if funct3 in (2, 3):
+                raise _Trap(CAUSE_ILLEGAL, inst)
             if branch_taken(funct3, a, b):
                 next_pc = (pc + imm_b(inst)) & MASK32
         elif opcode == 0x03:  # LOAD

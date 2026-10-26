@@ -17,6 +17,10 @@ module decoder (
     output reg         is_branch,
     output reg         is_jal,
     output reg         is_jalr,
+    output reg         is_csr,      // value for rd comes from the CSR file in MEM
+    output reg         is_ecall,
+    output reg         is_ebreak,
+    output reg         is_mret,
     output reg         illegal
 );
     localparam OP_LUI    = 7'b0110111;
@@ -29,6 +33,7 @@ module decoder (
     localparam OP_IMM    = 7'b0010011;
     localparam OP_OP     = 7'b0110011;
     localparam OP_FENCE  = 7'b0001111;
+    localparam OP_SYSTEM = 7'b1110011;
 
     wire [6:0] opcode = inst[6:0];
     wire [2:0] funct3 = inst[14:12];
@@ -53,6 +58,10 @@ module decoder (
         is_branch = 1'b0;
         is_jal    = 1'b0;
         is_jalr   = 1'b0;
+        is_csr    = 1'b0;
+        is_ecall  = 1'b0;
+        is_ebreak = 1'b0;
+        is_mret   = 1'b0;
         illegal   = 1'b0;
 
         case (opcode)
@@ -71,6 +80,7 @@ module decoder (
             OP_BRANCH: begin
                 imm = imm_b; is_branch = 1'b1; b_is_imm = 1'b0;
                 uses_rs1 = 1'b1; uses_rs2 = 1'b1;
+                illegal = funct3[2:1] == 2'b01;
             end
             OP_LOAD: begin
                 imm = imm_i; mem_read = 1'b1; uses_rs1 = 1'b1; reg_write = 1'b1;
@@ -88,6 +98,28 @@ module decoder (
                 alu_op = {inst[30], funct3};
             end
             OP_FENCE: ; // single hart, no caches: a no-op
+            OP_SYSTEM: begin
+                if (funct3 == 3'b000) begin
+                    // WFI may be a no-op, so it decodes to nothing
+                    case (inst)
+                        32'h0000_0073: is_ecall  = 1'b1;
+                        32'h0010_0073: is_ebreak = 1'b1;
+                        32'h3020_0073: is_mret   = 1'b1;
+                        32'h1050_0073: ;
+                        default:       illegal   = 1'b1;
+                    endcase
+                end else if (funct3 == 3'b100) begin
+                    illegal = 1'b1;
+                end else begin
+                    // the ALU passes the operand through: rs1 + 0 or 0 + zimm
+                    is_csr = 1'b1; reg_write = 1'b1;
+                    if (funct3[2]) begin
+                        imm = {27'd0, inst[19:15]}; a_is_zero = 1'b1;
+                    end else begin
+                        uses_rs1 = 1'b1;
+                    end
+                end
+            end
             default: illegal = 1'b1;
         endcase
     end

@@ -1,5 +1,5 @@
 // Simulation harness: one unified 64 KiB memory, MMIO for exit and putchar,
-// and a commit log printed from the core's retire port.
+// and a commit log printed from the core's retire and trap ports.
 //
 //   +image=<file>   memory image, one 32-bit little-endian word per line (hex)
 //   +max_cycles=N   give up after N cycles (default 2,000,000)
@@ -23,6 +23,8 @@ module tb;
     wire        retire_valid;
     wire [31:0] retire_pc, retire_value;
     wire [4:0]  retire_rd;
+    wire        trap_valid;
+    wire [31:0] trap_pc, trap_cause;
 
     wire in_ram_i = imem_addr < 4 * WORDS;
     wire in_ram_d = dmem_addr < 4 * WORDS;
@@ -35,7 +37,8 @@ module tb;
         .dmem_addr(dmem_addr), .dmem_wdata(dmem_wdata), .dmem_wstrb(dmem_wstrb),
         .dmem_read(dmem_read), .dmem_rdata(dmem_rdata),
         .retire_valid(retire_valid), .retire_pc(retire_pc),
-        .retire_rd(retire_rd), .retire_value(retire_value)
+        .retire_rd(retire_rd), .retire_value(retire_value),
+        .trap_valid(trap_valid), .trap_pc(trap_pc), .trap_cause(trap_cause)
     );
 
     reg [1023:0] image;
@@ -66,6 +69,9 @@ module tb;
                 retired = retired + 1;
                 $display("C %08x %2d %08x", retire_pc, retire_rd, retire_value);
             end
+            // The trapping instruction in MEM is younger than the one in WB.
+            // After the halting store, whatever follows it is not part of the run.
+            if (trap_valid && !exit_pending) $display("T %08x %08x", trap_pc, trap_cause);
 
             // The halting store retires one cycle after it leaves MEM.
             if (exit_pending) begin

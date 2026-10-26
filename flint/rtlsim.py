@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from flint.iss import Retired
+from flint.iss import Retired, Trap
 from flint.memmap import MEM_SIZE
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,7 +22,7 @@ class RtlSimError(Exception):
 
 @dataclass(frozen=True)
 class RtlResult:
-    log: list[Retired]
+    log: list[Retired | Trap]
     exit_code: int | None
     output: bytes
     cycles: int
@@ -77,7 +77,7 @@ def run(image: bytes, max_cycles: int = 2_000_000) -> RtlResult:
 
 
 def _parse(stdout: str) -> RtlResult:
-    log: list[Retired] = []
+    log: list[Retired | Trap] = []
     output = bytearray()
     exit_code = None
     cycles = retired = 0
@@ -87,6 +87,8 @@ def _parse(stdout: str) -> RtlResult:
             continue
         if parts[0] == "C":
             log.append(Retired(int(parts[1], 16), int(parts[2]), int(parts[3], 16)))
+        elif parts[0] == "T":
+            log.append(Trap(int(parts[1], 16), int(parts[2], 16)))
         elif parts[0] == "PUTC":
             output.append(int(parts[1], 16))
         elif parts[0] == "EXIT":
