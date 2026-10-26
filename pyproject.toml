@@ -1,0 +1,9 @@
+[project]
+name = "flint"
+version = "0.1.0"
+description = "A 5-stage pipelined RV32I core in Verilog, verified against a Python golden model."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

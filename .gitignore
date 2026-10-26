@@ -1,0 +1,6 @@
+# personal interview notes, not part of the project
+SPIEGAZIONE.md
+.venv/
+build/
+__pycache__/
+.pytest_cache/
